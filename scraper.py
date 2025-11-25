@@ -1,170 +1,120 @@
-import feedparser
-import psycopg2
 import os
-import logging
+import psycopg2
+from gnews import GNews
 from datetime import datetime
 from dotenv import load_dotenv
+import logging
+import time
 
-# Load .env for local testing
+# Load Environment
 load_dotenv()
-
-# Configure Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# --- CONFIGURATION ---
-# The "Google Proxy" trick allows us to get headlines from paywalled sites
-GOOGLE_NEWS_BASE = "https://news.google.com/rss/search?q="
+NEON_DB_URL = os.getenv("DATABASE_URL")
 
-FEEDS = [
-    # 1. Public Financial Feeds (Reliable)
-    "https://feeds.a.dj.com/rss/RSSMarketsMain.xml",   # WSJ Markets
-    "http://feeds.reuters.com/reuters/businessNews",     # Reuters Business
-    "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=10000664", # CNBC Finance
-    
-    # 2. The "Proxy" Feeds (Bloomberg & FT via Google News)
-    # We search for "site:bloomberg.com" restricted to the "Markets" topic
-    f"{GOOGLE_NEWS_BASE}site:bloomberg.com+intitle:markets&hl=en-US&gl=US&ceid=US:en",
-    f"{GOOGLE_NEWS_BASE}site:ft.com+intitle:markets&hl=en-US&gl=US&ceid=US:en",
-    
-    # 3. BNN Bloomberg (Canadian affiliate, free official RSS)
-    "https://www.bnnbloomberg.ca/content/bnnbloomberg/en/news.rss"
-]
+def get_neon_connection():
+    return psycopg2.connect(NEON_DB_URL)
 
-def clean_text(text):
-    """Truncate to save DB space (Neon Free Tier limit)"""
-    if not text: return ""
-    # Remove HTML tags if any
-    import re
-    clean = re.sub('<[^<]+?>', '', text)
-    return clean[:300]  # Hard limit 300 chars for description
-
-def run_scraper():
-    # 1. Connect to Neon
-    db_url = os.environ.get("DATABASE_URL")
-    if not db_url:
-        raise ValueError("DATABASE_URL environment variable is missing!")
+def run_collector():
+    logging.info("Initializing GNews Collector (Production Mode)...")
+    # Fetch last 24 hours for hourly runs (overlap ensures safety)
+    google_news = GNews(language='en', country='US', period='1d', max_results=50)
     
-    conn = psycopg2.connect(db_url)
+    # Premium Sources
+    sources = [
+        "Bloomberg", "Reuters", "CNBC", "Financial Times", 
+        "Wall Street Journal", "MarketWatch", "Yahoo Finance", "Forbes"
+    ]
+    
+    # Topics to widen the net (Multi-Query Strategy) - Removed Crypto/Tech
+    topics = ["Markets", "Economy", "Energy", "Central Banks", "Real Estate"]
+    
+    all_headlines = []
+    
+    for source in sources:
+        for topic in topics:
+            logging.info(f"Fetching '{topic}' from {source}...")
+            
+            # Construct Query: "Markets site:bloomberg.com"
+            query = f"{topic} site:{source.lower().replace(' ', '')}.com"
+            
+            try:
+                news = google_news.get_news(query)
+                
+                for article in news:
+                    try:
+                        # GNews date parsing
+                        pub_date = datetime.strptime(article['published date'], "%a, %d %b %Y %H:%M:%S %Z")
+                    except:
+                        pub_date = datetime.now()
+                        
+                    all_headlines.append({
+                        'title': article['title'],
+                        'link': article['url'],
+                        'published': pub_date,
+                        'source': source,
+                        'topic_tag': topic
+                    })
+                
+                # Be nice to Google
+                time.sleep(1) 
+                
+            except Exception as e:
+                logging.error(f"Failed to fetch {topic} from {source}: {e}")
+
+    logging.info(f"Collected {len(all_headlines)} raw headlines.")
+    
+    # Filter Noise & Deduplicate
+    noise_keywords = [
+        "Movie", "Box Office", "Review", "Best of", "Shopping", "Deals", 
+        "Celebrity", "Sport", "Horoscope", "Gift Guide", "The 10", "Top 10", 
+        "How to", "Explained", "What to Know"
+    ]
+    
+    seen_titles = set()
+    unique_headlines = []
+    
+    for h in all_headlines:
+        title_clean = h['title'].lower().strip()
+        # 1. Check Noise
+        if any(k.lower() in title_clean for k in noise_keywords):
+            continue
+        # 2. Check Duplicate
+        if title_clean in seen_titles:
+            continue
+            
+        seen_titles.add(title_clean)
+        unique_headlines.append(h)
+        
+    logging.info(f"Filtered out {len(all_headlines) - len(unique_headlines)} noisy/duplicate headlines.")
+    
+    if not unique_headlines:
+        logging.warning("No headlines left after filtering!")
+        return
+
+    conn = get_neon_connection()
     cur = conn.cursor()
-
-    # 2. Ensure Table Exists (Idempotent)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS headlines (
-            link TEXT PRIMARY KEY,
-            title TEXT,
-            description TEXT,
-            source TEXT,
-            published TIMESTAMP,
-            scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-    """)
-    conn.commit()
-
-    total_new = 0
     
-    # 3. Loop Through Feeds
-    for url in FEEDS:
+    logging.info("Saving to Neon Database...")
+    inserted = 0
+    for h in unique_headlines:
         try:
-            logging.info(f"Checking: {url}...")
-            feed = feedparser.parse(url)
-            logging.info(f"  > Found {len(feed.entries)} entries.")
-            
-            feed_new_count = 0
-            for entry in feed.entries:
-                # 1. URL Cleaning (Strip query params)
-                link = entry.link.split('?')[0]
-                
-                raw_title = entry.title
-                
-                # 2. Stop Phrases (Discard entirely)
-                stop_phrases = [
-                    "Video:", "Listen:", "Podcast:", "3-Minute MLIV", 
-                    "Research and Markets", "Net Asset Value", "summary", 
-                    "historical prices", "Profile and Biography", "Director Declaration", 
-                    "Inv Trust", "Company Announcement", "Amundi", "OTC Markets"
-                ]
-                if any(p.lower() in raw_title.lower() for p in stop_phrases):
-                    logging.info(f"    - Discarded (Stop Phrase): {raw_title[:50]}...")
-                    continue
-                
-                # Specific check for "Watch" at start (to avoid "Fed Watch" false positives)
-                if raw_title.lower().startswith("watch ") or "watch:" in raw_title.lower():
-                    logging.info(f"    - Discarded (Watch): {raw_title[:50]}...")
-                    continue
-                
-                # 3. Source Extraction & Title Cleaning
-                # Google News often formats titles as "Headline Text - Source Name"
-                source = "Google News" # Default fallback
-                title = raw_title
-                
-                # Check for source suffixes
-                import re
-                # Match " - Source" at the end of the string
-                match = re.search(r'(.*?) - (Bloomberg|Financial Times|Reuters|WSJ|CNBC|The Wall Street Journal)$', raw_title)
-                if match:
-                    title = match.group(1) # The headline part
-                    source_str = match.group(2)
-                    
-                    # Clean " - Company Announcement" if present
-                    title = title.replace(" - Company Announcement", "")
-                    
-                    # Normalize Source Names
-                    if "Bloomberg" in source_str: source = "Bloomberg"
-                    elif "Financial Times" in source_str: source = "Financial Times"
-                    elif "Reuters" in source_str: source = "Reuters"
-                    elif "WSJ" in source_str or "Wall Street" in source_str: source = "WSJ"
-                    elif "CNBC" in source_str: source = "CNBC"
-                else:
-                    # Fallback to URL detection if title didn't have the suffix
-                    if "wsj.com" in link: source = "WSJ"
-                    elif "reuters.com" in link: source = "Reuters"
-                    elif "cnbc.com" in link: source = "CNBC"
-                    elif "bloomberg" in link: source = "Bloomberg"
-                    elif "ft.com" in link: source = "Financial Times"
-
-                # 4. Description Logic (Save space)
-                raw_desc = clean_text(entry.get('summary', entry.get('description', '')))
-                # If description is just the title (common in RSS), drop it
-                if raw_desc.strip() == raw_title.strip() or raw_desc.strip() == title.strip():
-                    desc = ""
-                else:
-                    desc = raw_desc
-
-                # --- FILTER: NONSENSE (Existing) ---
-                if len(title) < 15: 
-                    logging.info(f"    - Discarded (Too Short): {title[:50]}...")
-                    continue
-                
-                skip_keywords = ["market talk", "morning bid", "evening bid", "breakingviews", "roundup", "factbox"]
-                if any(k in title.lower() for k in skip_keywords): 
-                    logging.info(f"    - Discarded (Keyword): {title[:50]}...")
-                    continue
-
-                # 5. Insert
-                try:
-                    cur.execute("""
-                        INSERT INTO headlines (link, title, description, source, published)
-                        VALUES (%s, %s, %s, %s, %s)
-                        ON CONFLICT (link) DO NOTHING;
-                    """, (link, title, desc, source, entry.get("published", datetime.now())))
-                    
-                    if cur.rowcount > 0:
-                        total_new += 1
-                        feed_new_count += 1
-                        logging.info(f"    + Added: {title[:50]}...")
-                except Exception as e:
-                    conn.rollback()
-                    logging.error(f"Row Error: {e}")
-
-            conn.commit()
-            logging.info(f"  > Saved {feed_new_count} new from this feed.")
-            
+            # Use ON CONFLICT DO NOTHING to avoid duplicates
+            cur.execute("""
+                INSERT INTO headlines (title, link, published, source, scraped_at)
+                VALUES (%s, %s, %s, %s, NOW())
+                ON CONFLICT (link) DO NOTHING
+            """, (h['title'], h['link'], h['published'], h['source']))
+            if cur.rowcount > 0:
+                inserted += 1
         except Exception as e:
-            logging.error(f"Feed Failed {url}: {e}")
-
-    cur.close()
+            logging.error(f"Error inserting {h['title']}: {e}")
+            conn.rollback()
+            continue
+            
+    conn.commit()
     conn.close()
-    logging.info(f"✅ Job Complete. Added {total_new} new headlines.")
+    logging.info(f"Successfully seeded {inserted} new headlines.")
 
 if __name__ == "__main__":
-    run_scraper()
+    run_collector()
