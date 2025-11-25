@@ -69,6 +69,7 @@ def run_scraper():
             feed = feedparser.parse(url)
             logging.info(f"  > Found {len(feed.entries)} entries.")
             
+            feed_new_count = 0
             for entry in feed.entries:
                 # 1. URL Cleaning (Strip query params)
                 link = entry.link.split('?')[0]
@@ -76,8 +77,9 @@ def run_scraper():
                 raw_title = entry.title
                 
                 # 2. Stop Phrases (Discard entirely)
-                stop_phrases = ["Watch:", "Video:", "Listen:", "Podcast:", "3-Minute MLIV"]
+                stop_phrases = ["Watch:", "Video:", "Listen:", "Podcast:", "3-Minute MLIV", "Research and Markets", "Net Asset Value"]
                 if any(p in raw_title for p in stop_phrases):
+                    logging.info(f"    - Discarded (Stop Phrase): {raw_title[:50]}...")
                     continue
                 
                 # 3. Source Extraction & Title Cleaning
@@ -92,6 +94,9 @@ def run_scraper():
                 if match:
                     title = match.group(1) # The headline part
                     source_str = match.group(2)
+                    
+                    # Clean " - Company Announcement" if present
+                    title = title.replace(" - Company Announcement", "")
                     
                     # Normalize Source Names
                     if "Bloomberg" in source_str: source = "Bloomberg"
@@ -116,9 +121,14 @@ def run_scraper():
                     desc = raw_desc
 
                 # --- FILTER: NONSENSE (Existing) ---
-                if len(title) < 15: continue
+                if len(title) < 15: 
+                    logging.info(f"    - Discarded (Too Short): {title[:50]}...")
+                    continue
+                
                 skip_keywords = ["market talk", "morning bid", "evening bid", "breakingviews", "roundup", "factbox"]
-                if any(k in title.lower() for k in skip_keywords): continue
+                if any(k in title.lower() for k in skip_keywords): 
+                    logging.info(f"    - Discarded (Keyword): {title[:50]}...")
+                    continue
 
                 # 5. Insert
                 try:
