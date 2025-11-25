@@ -77,8 +77,13 @@ def run_scraper():
                 raw_title = entry.title
                 
                 # 2. Stop Phrases (Discard entirely)
-                stop_phrases = ["Watch:", "Video:", "Listen:", "Podcast:", "3-Minute MLIV", "Research and Markets", "Net Asset Value"]
-                if any(p in raw_title for p in stop_phrases):
+                stop_phrases = [
+                    "Watch:", "Video:", "Listen:", "Podcast:", "3-Minute MLIV", 
+                    "Research and Markets", "Net Asset Value", "summary", 
+                    "historical prices", "Profile and Biography", "Director Declaration", 
+                    "Merger of", "Inv Trust"
+                ]
+                if any(p.lower() in raw_title.lower() for p in stop_phrases):
                     logging.info(f"    - Discarded (Stop Phrase): {raw_title[:50]}...")
                     continue
                 
