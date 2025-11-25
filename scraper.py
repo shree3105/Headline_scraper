@@ -78,13 +78,18 @@ def run_scraper():
                 
                 # 2. Stop Phrases (Discard entirely)
                 stop_phrases = [
-                    "Watch:", "Video:", "Listen:", "Podcast:", "3-Minute MLIV", 
+                    "Video:", "Listen:", "Podcast:", "3-Minute MLIV", 
                     "Research and Markets", "Net Asset Value", "summary", 
                     "historical prices", "Profile and Biography", "Director Declaration", 
-                    "Merger of", "Inv Trust"
+                    "Inv Trust", "Company Announcement", "Amundi", "OTC Markets"
                 ]
                 if any(p.lower() in raw_title.lower() for p in stop_phrases):
                     logging.info(f"    - Discarded (Stop Phrase): {raw_title[:50]}...")
+                    continue
+                
+                # Specific check for "Watch" at start (to avoid "Fed Watch" false positives)
+                if raw_title.lower().startswith("watch ") or "watch:" in raw_title.lower():
+                    logging.info(f"    - Discarded (Watch): {raw_title[:50]}...")
                     continue
                 
                 # 3. Source Extraction & Title Cleaning
