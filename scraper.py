@@ -71,7 +71,15 @@ def run_collector():
         "How to", "Explained", "What to Know"
     ]
     
-    seen_titles = set()
+    # 1. Load Existing Titles from DB (Last 24h) to prevent "Semantic Duplicates"
+    conn = get_neon_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT title FROM headlines WHERE published >= NOW() - INTERVAL '24 hours'")
+    existing_titles = {row[0].lower().strip() for row in cur.fetchall()}
+    cur.close()
+    conn.close()
+    
+    seen_titles = existing_titles # Initialize with DB history
     unique_headlines = []
     
     for h in all_headlines:
@@ -79,7 +87,7 @@ def run_collector():
         # 1. Check Noise
         if any(k.lower() in title_clean for k in noise_keywords):
             continue
-        # 2. Check Duplicate
+        # 2. Check Duplicate (against current batch AND db history)
         if title_clean in seen_titles:
             continue
             
