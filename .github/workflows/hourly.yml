@@ -1,0 +1,28 @@
+name: Hourly Financial News Scraper
+
+on:
+  schedule:
+    # Run at minute 0 of every hour (e.g. 1:00, 2:00...)
+    - cron: '0 * * * *'
+  workflow_dispatch: # Adds a "Run Now" button for testing
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: pip install feedparser psycopg2-binary
+
+      - name: Run Scraper
+        env:
+          # You must add this secret in GitHub Settings!
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python scraper.py
