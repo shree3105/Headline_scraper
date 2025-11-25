@@ -69,31 +69,58 @@ def run_scraper():
             feed = feedparser.parse(url)
             logging.info(f"  > Found {len(feed.entries)} entries.")
             
-            feed_new_count = 0
             for entry in feed.entries:
-                # Data Cleaning
-                link = entry.link.split('?')[0] # Remove tracking params
-                title = entry.title
-                desc = clean_text(entry.get('summary', entry.get('description', '')))
+                # 1. URL Cleaning (Strip query params)
+                link = entry.link.split('?')[0]
                 
-                # Identify Source (Clean up Google News proxy names)
-                source = "Google News" # Default
-                if "wsj.com" in link: source = "WSJ"
-                elif "reuters.com" in link: source = "Reuters"
-                elif "cnbc.com" in link: source = "CNBC"
-                elif "bloomberg" in link: source = "Bloomberg"
-                elif "ft.com" in link: source = "Financial Times"
-
-                # --- FILTER: NONSENSE ---
-                # 1. Too short
-                if len(title) < 15:
+                raw_title = entry.title
+                
+                # 2. Stop Phrases (Discard entirely)
+                stop_phrases = ["Watch:", "Video:", "Listen:", "Podcast:", "3-Minute MLIV"]
+                if any(p in raw_title for p in stop_phrases):
                     continue
-                # 2. Keywords to skip
+                
+                # 3. Source Extraction & Title Cleaning
+                # Google News often formats titles as "Headline Text - Source Name"
+                source = "Google News" # Default fallback
+                title = raw_title
+                
+                # Check for source suffixes
+                import re
+                # Match " - Source" at the end of the string
+                match = re.search(r'(.*?) - (Bloomberg|Financial Times|Reuters|WSJ|CNBC|The Wall Street Journal)$', raw_title)
+                if match:
+                    title = match.group(1) # The headline part
+                    source_str = match.group(2)
+                    
+                    # Normalize Source Names
+                    if "Bloomberg" in source_str: source = "Bloomberg"
+                    elif "Financial Times" in source_str: source = "Financial Times"
+                    elif "Reuters" in source_str: source = "Reuters"
+                    elif "WSJ" in source_str or "Wall Street" in source_str: source = "WSJ"
+                    elif "CNBC" in source_str: source = "CNBC"
+                else:
+                    # Fallback to URL detection if title didn't have the suffix
+                    if "wsj.com" in link: source = "WSJ"
+                    elif "reuters.com" in link: source = "Reuters"
+                    elif "cnbc.com" in link: source = "CNBC"
+                    elif "bloomberg" in link: source = "Bloomberg"
+                    elif "ft.com" in link: source = "Financial Times"
+
+                # 4. Description Logic (Save space)
+                raw_desc = clean_text(entry.get('summary', entry.get('description', '')))
+                # If description is just the title (common in RSS), drop it
+                if raw_desc.strip() == raw_title.strip() or raw_desc.strip() == title.strip():
+                    desc = ""
+                else:
+                    desc = raw_desc
+
+                # --- FILTER: NONSENSE (Existing) ---
+                if len(title) < 15: continue
                 skip_keywords = ["market talk", "morning bid", "evening bid", "breakingviews", "roundup", "factbox"]
-                if any(k in title.lower() for k in skip_keywords):
-                    continue
+                if any(k in title.lower() for k in skip_keywords): continue
 
-                # 4. Insert (Ignore Duplicates)
+                # 5. Insert
                 try:
                     cur.execute("""
                         INSERT INTO headlines (link, title, description, source, published)
